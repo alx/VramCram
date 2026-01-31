@@ -1,0 +1,90 @@
+# VramCram Example Configuration
+# Copy to config.yaml and adjust paths/settings for your environment
+
+redis:
+  host: localhost
+  port: 6379
+  db: 0
+  password: null  # Set if Redis requires auth
+  max_connections: 50
+  socket_timeout: 5
+  socket_connect_timeout: 5
+
+vram:
+  total_mb: 16384  # 16GB GPU
+  safety_margin_mb: 512  # 512MB reserved for system
+  monitoring_interval_seconds: 5
+
+api:
+  host: 0.0.0.0
+  port: 8000
+  workers: 1
+
+models:
+  llm:
+    - name: llama-ministral
+      type: llm
+      model_path: ./models/ministral-8b-instruct-2410-Q4_K_M.gguf
+      vram_mb: 6000
+      config:
+        n_gpu_layers: 35
+        n_ctx: 4096
+        n_batch: 512
+        temperature: 0.7
+        max_tokens: 512
+
+    - name: llama-3b
+      type: llm
+      model_path: ./models/llama-3.2-3b-instruct-q4_k_m.gguf
+      vram_mb: 3500
+      config:
+        n_gpu_layers: 35
+        n_ctx: 4096
+        n_batch: 512
+        temperature: 0.7
+
+  diffusion:
+    - name: stable-diffusion-turbo
+      type: diffusion
+      model_path: ./models/sd_xl_turbo_1.0_fp16.safetensors
+      vram_mb: 8000
+      config:
+        width: 512
+        height: 512
+        sample_steps: 4
+        cfg_scale: 1.0
+
+agents:
+  heartbeat_interval_seconds: 10
+  heartbeat_timeout_seconds: 30
+  worker_ready_timeout_seconds: 60
+  graceful_shutdown_timeout_seconds: 300
+  eviction_timeout_seconds: 30
+
+jobs:
+  max_queue_size: 1000
+  result_ttl_seconds: 86400  # 24 hours
+  default_timeout_seconds: 300
+
+output:
+  base_path: ./outputs
+  results_path: ./results
+
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: json  # json or text
+  output: stdout  # stdout or stderr
+
+metrics:
+  enabled: true
+  port: 9090
+  path: /metrics
+
+# Inference binary paths
+# Download binaries from:
+# - llama.cpp: https://github.com/ggerganov/llama.cpp
+# - stable-diffusion.cpp: https://github.com/leejet/stable-diffusion.cpp
+inference:
+  llama_server_path: llama-server  # Path to llama-server binary (in PATH or absolute path)
+  llama_cli_path: llama-cli  # Deprecated, kept for compatibility
+  sd_binary_path: sd  # Path to stable-diffusion.cpp sd binary
