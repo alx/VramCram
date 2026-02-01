@@ -47,6 +47,8 @@ config.yaml
 /var/vramcram/
 outputs/
 results/
+models/
+models
 *.gguf
 *.safetensors
 *.pth
