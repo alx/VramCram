@@ -69,6 +69,9 @@ jobs:
 output:
   base_path: ./outputs
   results_path: ./results
+  image_result_format: base64  # Options: "base64" (default) or "path"
+  # base64: Returns data URI (self-contained, ~33% larger than raw image)
+  # path: Returns filesystem path (backward compatible, requires file access)
 
 logging:
   level: INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -88,3 +91,13 @@ inference:
   llama_server_path: llama-server  # Path to llama-server binary (in PATH or absolute path)
   llama_cli_path: llama-cli  # Deprecated, kept for compatibility
   sd_binary_path: sd  # Path to stable-diffusion.cpp sd binary
+
+# Security configuration
+security:
+  max_prompt_length: 50000  # Maximum prompt length in characters
+  max_negative_prompt_length: 50000  # Maximum negative prompt length
+  subprocess_max_memory_mb: null  # Set to limit subprocess memory (e.g., 10240 for 10GB), null for no limit
+  subprocess_max_output_bytes: 10485760  # 10MB maximum output from subprocesses
+  allowed_model_base_path: ./models  # Base directory for model files, null for no restriction
+  validate_model_paths: true  # Validate model paths for security
+  validate_binary_paths: true  # Validate binary paths for security

@@ -128,6 +128,10 @@ class OutputConfig(BaseModel):
 
     base_path: Path = Field(default=Path("/var/vramcram/outputs"))
     results_path: Path = Field(default=Path("/var/vramcram/results"))
+    image_result_format: Literal["base64", "path"] = Field(
+        default="base64",
+        description="Format for diffusion image results: 'base64' for data URI, 'path' for filesystem path"
+    )
 
 
 class LoggingConfig(BaseModel):
@@ -144,6 +148,18 @@ class MetricsConfig(BaseModel):
     enabled: bool = True
     port: int = Field(default=9090, ge=1, le=65535)
     path: str = "/metrics"
+
+
+class SecurityConfig(BaseModel):
+    """Security constraints configuration."""
+
+    max_prompt_length: int = Field(default=50000, ge=100, le=1000000)
+    max_negative_prompt_length: int = Field(default=50000, ge=100, le=1000000)
+    subprocess_max_memory_mb: int | None = Field(default=None, ge=1024)
+    subprocess_max_output_bytes: int = Field(default=10485760, ge=1024)  # 10MB
+    allowed_model_base_path: Path | None = Field(default=None)
+    validate_model_paths: bool = Field(default=True)
+    validate_binary_paths: bool = Field(default=True)
 
 
 class InferenceConfig(BaseModel):
@@ -167,6 +183,7 @@ class VramCramConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
 
     @model_validator(mode="after")
     def validate_vram_capacity(self) -> "VramCramConfig":
