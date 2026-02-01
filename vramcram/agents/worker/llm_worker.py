@@ -9,6 +9,7 @@ from vramcram.agents.worker.base import BaseWorker
 from vramcram.config.models import VramCramConfig
 from vramcram.events.bus import EventBus
 from vramcram.redis.client import RedisClientFactory
+from vramcram.security import validate_prompt
 
 
 class LLMWorker(BaseWorker):
@@ -86,15 +87,15 @@ class LLMWorker(BaseWorker):
 
     async def execute_inference(
         self, prompt: str, params: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Execute LLM inference via llama-cli subprocess.
+    ) -> str:
+        """Execute LLM inference via llama-server HTTP API.
 
         Args:
             prompt: Input text prompt.
             params: Generation parameters (max_tokens, temperature, etc.).
 
         Returns:
-            Dictionary with "text" key containing generated text.
+            Direct text string containing generated text.
 
         Raises:
             RuntimeError: If inference fails.
@@ -123,7 +124,7 @@ class LLMWorker(BaseWorker):
             generated_length=len(result),
         )
 
-        return {"text": result}
+        return result
 
     async def _run_llama_server_inference(
         self,
@@ -150,6 +151,12 @@ class LLMWorker(BaseWorker):
         Raises:
             RuntimeError: If HTTP request fails or times out.
         """
+        # Validate prompt
+        try:
+            validate_prompt(prompt, self.config.security.max_prompt_length)
+        except ValueError as e:
+            raise RuntimeError(f"Prompt validation failed: {e}")
+
         # Calculate port based on model index
         model_index = self._get_model_index()
         port = 8081 + model_index
@@ -177,8 +184,27 @@ class LLMWorker(BaseWorker):
                 )
                 response.raise_for_status()
 
+                # Check response size before processing
+                content_length = len(response.content)
+                max_output = self.config.security.subprocess_max_output_bytes
+                if content_length > max_output:
+                    raise RuntimeError(
+                        f"Response size {content_length} exceeds limit of {max_output} bytes"
+                    )
+
                 result = response.json()
                 generated_text = result["choices"][0]["message"]["content"]
+
+                # Truncate if generated text is too large
+                if len(generated_text.encode()) > max_output:
+                    self.logger.warning(
+                        "response_truncated",
+                        original_size=len(generated_text),
+                        max_size=max_output,
+                    )
+                    # Truncate to safe size
+                    generated_text = generated_text[:max_output // 2]  # Conservative estimate
+
                 return generated_text
 
             except httpx.TimeoutException:

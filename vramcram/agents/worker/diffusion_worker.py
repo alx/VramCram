@@ -1,6 +1,7 @@
 """Diffusion worker using sd binary subprocess calls."""
 
 import asyncio
+import base64
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,8 @@ from vramcram.agents.worker.base import BaseWorker
 from vramcram.config.models import VramCramConfig
 from vramcram.events.bus import EventBus
 from vramcram.redis.client import RedisClientFactory
+from vramcram.security import validate_binary_path, validate_path, validate_prompt
+from vramcram.security.resource_limits import create_resource_limiter
 
 
 class DiffusionWorker(BaseWorker):
@@ -57,36 +60,76 @@ class DiffusionWorker(BaseWorker):
         if not model_path:
             raise ValueError(f"Model path not found for: {self.model_name}")
 
-        # Check binary exists
-        binary_path = self.config.inference.sd_binary_path
-        if not os.path.exists(binary_path):
-            raise RuntimeError(f"sd binary not found at {binary_path}")
+        # Validate binary path
+        if self.config.security.validate_binary_paths:
+            try:
+                binary_path = validate_binary_path(self.config.inference.sd_binary_path)
+            except ValueError as e:
+                raise RuntimeError(f"Invalid sd binary path: {e}")
+        else:
+            binary_path = Path(self.config.inference.sd_binary_path)
+            if not binary_path.exists():
+                raise RuntimeError(f"sd binary not found at {binary_path}")
 
-        # Check model file exists
-        if not os.path.exists(model_path):
-            raise RuntimeError(f"Model file not found: {model_path}")
+        # Validate model path
+        if self.config.security.validate_model_paths:
+            try:
+                model_path_validated = validate_path(
+                    Path(model_path),
+                    self.config.security.allowed_model_base_path,
+                )
+            except ValueError as e:
+                raise RuntimeError(f"Invalid model path: {e}")
+        else:
+            model_path_validated = Path(model_path)
+            if not model_path_validated.exists():
+                raise RuntimeError(f"Model file not found: {model_path}")
 
-        # Check optional files (VAE, LLM, LoRA dir)
+        # Validate optional files (VAE, LLM, LoRA dir)
         if "vae_path" in self.model_config:
             vae_path = self.model_config["vae_path"]
-            if not os.path.exists(vae_path):
+            if self.config.security.validate_model_paths:
+                try:
+                    validate_path(
+                        Path(vae_path),
+                        self.config.security.allowed_model_base_path,
+                    )
+                except ValueError as e:
+                    self.logger.warning("vae_validation_failed", path=vae_path, error=str(e))
+            elif not os.path.exists(vae_path):
                 self.logger.warning("vae_not_found", path=vae_path)
 
         if "llm_path" in self.model_config:
             llm_path = self.model_config["llm_path"]
-            if not os.path.exists(llm_path):
+            if self.config.security.validate_model_paths:
+                try:
+                    validate_path(
+                        Path(llm_path),
+                        self.config.security.allowed_model_base_path,
+                    )
+                except ValueError as e:
+                    self.logger.warning("llm_validation_failed", path=llm_path, error=str(e))
+            elif not os.path.exists(llm_path):
                 self.logger.warning("llm_not_found", path=llm_path)
 
         if "lora_model_dir" in self.model_config:
             lora_dir = self.model_config["lora_model_dir"]
-            if not os.path.exists(lora_dir):
+            if self.config.security.validate_model_paths:
+                try:
+                    validate_path(
+                        Path(lora_dir),
+                        self.config.security.allowed_model_base_path,
+                    )
+                except ValueError as e:
+                    self.logger.warning("lora_validation_failed", path=lora_dir, error=str(e))
+            elif not os.path.exists(lora_dir):
                 self.logger.warning("lora_dir_not_found", path=lora_dir)
 
         self.logger.info("sd_binary_validated", binary_path=binary_path, model_path=model_path)
 
     async def execute_inference(
         self, prompt: str, params: dict[str, Any]
-    ) -> dict[str, Any]:
+    ) -> str:
         """Execute diffusion inference via sd subprocess.
 
         Args:
@@ -94,7 +137,7 @@ class DiffusionWorker(BaseWorker):
             params: Generation parameters (width, height, steps, cfg_scale, etc.).
 
         Returns:
-            Dictionary with "image_path" key containing path to saved image.
+            String containing base64 data URI or filesystem path (based on config).
 
         Raises:
             RuntimeError: If inference fails.
@@ -130,7 +173,45 @@ class DiffusionWorker(BaseWorker):
 
         self.logger.info("image_saved", output_path=str(output_path))
 
-        return {"image_path": str(output_path)}
+        # Check config for result format
+        result_format = self.config.output.image_result_format
+
+        if result_format == "path":
+            # Return filesystem path (backward compatible)
+            self.logger.info(
+                "image_result_format_path",
+                path=str(output_path),
+            )
+            return str(output_path)
+
+        # Default: return base64
+        try:
+            with open(output_path, "rb") as f:
+                image_bytes = f.read()
+
+            # Encode to base64
+            image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+
+            # Create data URI with MIME type
+            image_data_uri = f"data:image/png;base64,{image_base64}"
+
+            self.logger.info(
+                "image_encoded_to_base64",
+                file_size_bytes=len(image_bytes),
+                base64_size=len(image_data_uri),
+                path=str(output_path),
+            )
+
+            return image_data_uri
+
+        except Exception as e:
+            self.logger.error(
+                "failed_to_encode_image",
+                error=str(e),
+                path=str(output_path),
+            )
+            # Fallback to path
+            return str(output_path)
 
     async def _run_sd_inference(
         self,
@@ -161,6 +242,17 @@ class DiffusionWorker(BaseWorker):
         Raises:
             RuntimeError: If subprocess fails or times out.
         """
+        # Validate prompts
+        try:
+            validate_prompt(prompt, self.config.security.max_prompt_length)
+            if negative_prompt:
+                validate_prompt(
+                    negative_prompt,
+                    self.config.security.max_negative_prompt_length,
+                )
+        except ValueError as e:
+            raise RuntimeError(f"Prompt validation failed: {e}")
+
         model_config = self._get_model_config()
         if not model_config:
             raise RuntimeError(f"Model config not found: {self.model_name}")
@@ -206,18 +298,58 @@ class DiffusionWorker(BaseWorker):
             "-v",                      # Verbose output for debugging
         ])
 
-        # Run subprocess with timeout
+        # Run subprocess with timeout and resource limits
+        preexec_fn = create_resource_limiter(
+            self.config.security.subprocess_max_memory_mb
+        )
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            preexec_fn=preexec_fn,
         )
 
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
+            # Read output with size limits to prevent memory exhaustion
+            stdout_chunks: list[bytes] = []
+            stderr_chunks: list[bytes] = []
+
+            async def read_with_limit(
+                stream: asyncio.StreamReader,
+                chunks: list[bytes],
+                name: str,
+            ) -> None:
+                """Read stream with size limit."""
+                total_bytes = 0
+                max_output = self.config.security.subprocess_max_output_bytes
+                while True:
+                    chunk = await stream.read(4096)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > max_output:
+                        proc.kill()
+                        raise RuntimeError(
+                            f"Subprocess {name} exceeded output limit of {max_output} bytes"
+                        )
+                    chunks.append(chunk)
+
+            # Read stdout and stderr concurrently with timeout
+            await asyncio.wait_for(
+                asyncio.gather(
+                    read_with_limit(proc.stdout, stdout_chunks, "stdout"),  # type: ignore
+                    read_with_limit(proc.stderr, stderr_chunks, "stderr"),  # type: ignore
+                ),
                 timeout=self.config.jobs.default_timeout_seconds,
             )
+
+            # Wait for process to complete
+            await proc.wait()
+
+            stdout = b"".join(stdout_chunks)
+            stderr = b"".join(stderr_chunks)
+
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()

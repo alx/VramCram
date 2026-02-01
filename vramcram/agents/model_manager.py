@@ -4,6 +4,7 @@ import asyncio
 import multiprocessing
 import os
 import signal
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -14,6 +15,8 @@ from vramcram.events.bus import EventBus
 from vramcram.events.schema import AgentEvent
 from vramcram.events.types import EventType
 from vramcram.queue.registry import ModelState
+from vramcram.security import validate_binary_path, validate_path
+from vramcram.security.resource_limits import create_resource_limiter
 
 logger = structlog.get_logger()
 
@@ -223,14 +226,43 @@ class ModelManagerAgent:
         Raises:
             RuntimeError: If llama-server fails to start.
         """
+        # Validate binary path
+        if self.config.security.validate_binary_paths:
+            try:
+                llama_server_path = validate_binary_path(
+                    self.config.inference.llama_server_path
+                )
+            except ValueError as e:
+                raise RuntimeError(f"Invalid llama-server binary path: {e}")
+        else:
+            llama_server_path = Path(self.config.inference.llama_server_path)
+            if not llama_server_path.exists():
+                raise RuntimeError(
+                    f"llama-server binary not found at {llama_server_path}"
+                )
+
+        # Validate model path
+        if self.config.security.validate_model_paths:
+            try:
+                model_path_validated = validate_path(
+                    Path(model_config["model_path"]),
+                    self.config.security.allowed_model_base_path,
+                )
+            except ValueError as e:
+                raise RuntimeError(f"Invalid model path: {e}")
+        else:
+            model_path_validated = Path(model_config["model_path"])
+            if not model_path_validated.exists():
+                raise RuntimeError(f"Model file not found: {model_path_validated}")
+
         # Calculate port (base 8081 + model index)
         model_index = self._get_model_index()
         port = 8081 + model_index
 
         # Build command
         cmd = [
-            str(self.config.inference.llama_server_path),
-            "-m", model_config["model_path"],
+            str(llama_server_path),
+            "-m", str(model_path_validated),
             "--port", str(port),
             "--host", "127.0.0.1",
             "-c", str(model_config["config"].get("n_ctx", 4096)),
@@ -240,7 +272,12 @@ class ModelManagerAgent:
         self.logger.info(
             "spawning_llama_server",
             port=port,
-            model_path=model_config["model_path"]
+            model_path=str(model_path_validated)
+        )
+
+        # Create resource limiter
+        preexec_fn = create_resource_limiter(
+            self.config.security.subprocess_max_memory_mb
         )
 
         # Spawn subprocess
@@ -248,6 +285,7 @@ class ModelManagerAgent:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            preexec_fn=preexec_fn,
         )
 
         self.llama_server_port = port
