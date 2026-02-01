@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import structlog
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from vramcram.api.models import (
     HealthResponse,
@@ -15,12 +16,14 @@ from vramcram.api.models import (
     JobSubmitResponse,
     ModelInfo,
 )
+from vramcram.api.params import BaseDiffusionParams, BaseLLMParams
 from vramcram.config.models import VramCramConfig
 from vramcram.events.bus import EventBus
 from vramcram.events.schema import AgentEvent
 from vramcram.events.types import EventType
 from vramcram.queue.job import Job, JobStatus
 from vramcram.redis.client import RedisClientFactory
+from vramcram.security import validate_prompt
 
 logger = structlog.get_logger()
 
@@ -87,6 +90,44 @@ class APIGateway:
                     raise HTTPException(
                         status_code=status.HTTP_404_NOT_FOUND,
                         detail=f"Model not found: {request.model}",
+                    )
+
+                # Get model type for validation
+                model_type = self._get_model_type(request.model)
+
+                # Validate prompt length
+                try:
+                    validate_prompt(
+                        request.prompt,
+                        self.config.security.max_prompt_length,
+                    )
+                except ValueError as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=str(e),
+                    )
+
+                # Validate params using appropriate schema
+                try:
+                    if model_type == "llm":
+                        BaseLLMParams(**request.params)
+                    elif model_type == "diffusion":
+                        params_model = BaseDiffusionParams(**request.params)
+                        # Validate negative prompt length if present
+                        if params_model.negative_prompt:
+                            validate_prompt(
+                                params_model.negative_prompt,
+                                self.config.security.max_negative_prompt_length,
+                            )
+                except ValidationError as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid parameters: {e}",
+                    )
+                except ValueError as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=str(e),
                     )
 
                 # Generate job ID
@@ -342,6 +383,26 @@ class APIGateway:
             if model.name == model_name:
                 return True
         return False
+
+    def _get_model_type(self, model_name: str) -> str:
+        """Get the type of a model.
+
+        Args:
+            model_name: Model name to check.
+
+        Returns:
+            Model type ("llm" or "diffusion").
+
+        Raises:
+            ValueError: If model not found.
+        """
+        for model in self.config.models.llm:
+            if model.name == model_name:
+                return "llm"
+        for model in self.config.models.diffusion:
+            if model.name == model_name:
+                return "diffusion"
+        raise ValueError(f"Model not found: {model_name}")
 
 
 def create_app(

@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class JobSubmitRequest(BaseModel):
@@ -14,6 +14,16 @@ class JobSubmitRequest(BaseModel):
     params: dict[str, Any] = Field(
         default_factory=dict, description="Model-specific parameters"
     )
+
+    @field_validator("prompt")
+    @classmethod
+    def validate_prompt(cls, v: str) -> str:
+        """Validate prompt doesn't contain null bytes and isn't empty."""
+        if "\x00" in v:
+            raise ValueError("Prompt contains null bytes which are not allowed")
+        if not v.strip():
+            raise ValueError("Prompt cannot be empty or whitespace-only")
+        return v
 
 
 class JobSubmitResponse(BaseModel):
