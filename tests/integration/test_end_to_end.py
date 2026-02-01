@@ -168,7 +168,7 @@ class TestJobLifecycle:
 
         # Transition to COMPLETED
         job.status = JobStatus.COMPLETED
-        job.result = '{"text": "test result"}'
+        job.result = "test result"  # Direct string (no JSON wrapping)
         job.duration_ms = 1000
         client.hset(job_key, mapping=job.to_dict())
 

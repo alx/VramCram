@@ -1,7 +1,6 @@
 """Base worker agent for inference execution."""
 
 import asyncio
-import json
 import os
 import time
 from abc import ABC, abstractmethod
@@ -127,7 +126,7 @@ class BaseWorker(ABC):
     @abstractmethod
     async def execute_inference(
         self, prompt: str, params: dict[str, Any]
-    ) -> dict[str, Any]:
+    ) -> str:
         """Execute inference on the loaded model.
 
         Args:
@@ -135,9 +134,9 @@ class BaseWorker(ABC):
             params: Model-specific parameters.
 
         Returns:
-            Dictionary containing inference result.
-            For LLMs: {"text": "generated text"}
-            For diffusion: {"image_path": "/path/to/image.png"}
+            String containing inference result (text or base64 data URI).
+            For LLMs: Direct text string
+            For diffusion: Base64 data URI or filesystem path (based on config)
 
         Raises:
             Exception: If inference fails.
@@ -239,21 +238,21 @@ class BaseWorker(ABC):
                 {"job_id": job_id, "model": self.model_name},
             )
 
-            # Execute inference
+            # Execute inference (now returns string directly)
             start_time = time.time()
             result = await self.execute_inference(job.prompt, job.params)
             duration_ms = int((time.time() - start_time) * 1000)
 
-            # Store result in Redis with TTL
+            # Store result string directly in Redis with TTL
             result_key = f"result:{job_id}"
             result_ttl = self.config.jobs.result_ttl_seconds
-            self.redis_client.setex(result_key, result_ttl, json.dumps(result))
+            self.redis_client.setex(result_key, result_ttl, result)
 
             # Update job status to COMPLETED
             job.status = JobStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
             job.duration_ms = duration_ms
-            job.result = json.dumps(result)
+            job.result = result
             self.redis_client.hset(job_key, mapping=job.to_dict())
 
             # Publish event
